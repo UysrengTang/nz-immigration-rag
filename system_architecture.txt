@@ -739,3 +739,528 @@ This system should be positioned as:
 - a citation-first research and support tool
 - not a legal adviser
 - not an eligibility decision engine
+
+
+22. Backend Module Layout
+
+22.1 Backend objectives
+
+The backend should be:
+- modular enough to evolve without major rewrites
+- simple enough to implement quickly
+- explicit about boundaries between ingestion, retrieval, graph orchestration, and API delivery
+
+The MVP backend should separate:
+- domain schemas
+- database persistence
+- retrieval logic
+- graph logic
+- HTTP API logic
+
+22.2 Recommended package layout
+
+- backend/
+- backend/app/
+- backend/app/main.py
+- backend/app/settings.py
+- backend/app/logging.py
+- backend/app/config/
+- backend/app/config/source_allowlist.py
+- backend/app/config/prompts.py
+- backend/app/api/
+- backend/app/api/routes/
+- backend/app/api/routes/chat.py
+- backend/app/api/routes/health.py
+- backend/app/api/dependencies.py
+- backend/app/db/
+- backend/app/db/client.py
+- backend/app/db/models.py
+- backend/app/db/repositories/
+- backend/app/db/repositories/documents.py
+- backend/app/db/repositories/chunks.py
+- backend/app/db/repositories/ingestion_runs.py
+- backend/app/db/repositories/evaluations.py
+- backend/app/db/migrations/
+- backend/app/schemas/
+- backend/app/schemas/common.py
+- backend/app/schemas/source.py
+- backend/app/schemas/document.py
+- backend/app/schemas/chunk.py
+- backend/app/schemas/retrieval.py
+- backend/app/schemas/graph.py
+- backend/app/schemas/answer.py
+- backend/app/schemas/api.py
+- backend/app/ingestion/
+- backend/app/ingestion/loaders/
+- backend/app/ingestion/loaders/inz_website.py
+- backend/app/ingestion/loaders/operational_manual.py
+- backend/app/ingestion/normalize.py
+- backend/app/ingestion/extract.py
+- backend/app/ingestion/pipeline.py
+- backend/app/indexing/
+- backend/app/indexing/chunker.py
+- backend/app/indexing/embedder.py
+- backend/app/indexing/upsert.py
+- backend/app/indexing/pipeline.py
+- backend/app/retrieval/
+- backend/app/retrieval/query_rewrite.py
+- backend/app/retrieval/filters.py
+- backend/app/retrieval/vector_store.py
+- backend/app/retrieval/context_expansion.py
+- backend/app/retrieval/dedupe.py
+- backend/app/retrieval/service.py
+- backend/app/rerank/
+- backend/app/rerank/service.py
+- backend/app/answering/
+- backend/app/answering/prompting.py
+- backend/app/answering/citations.py
+- backend/app/answering/service.py
+- backend/app/graph/
+- backend/app/graph/state.py
+- backend/app/graph/nodes.py
+- backend/app/graph/router.py
+- backend/app/graph/workflow.py
+- backend/app/guards/
+- backend/app/guards/domain.py
+- backend/app/guards/personal_advice.py
+- backend/app/observability/
+- backend/app/observability/langsmith.py
+- backend/app/observability/metrics.py
+- backend/app/services/
+- backend/app/services/chat_service.py
+- backend/app/services/ingestion_service.py
+- backend/app/utils/
+- backend/app/utils/text.py
+- backend/app/utils/hash.py
+- backend/tests/
+- backend/tests/unit/
+- backend/tests/integration/
+- backend/evals/
+
+22.3 Module responsibilities
+
+main.py
+- app bootstrap
+- register API routes
+- initialize shared clients and settings
+
+settings.py
+- environment-backed configuration
+- model names
+- Supabase connection config
+- feature flags
+
+api/routes/chat.py
+- accept chat requests
+- call chat service
+- return structured response payload
+
+db/models.py
+- ORM or typed DB row definitions
+- central mapping of persistent entities
+
+db/repositories/*
+- encapsulate all SQL access
+- avoid raw SQL leaking into graph or service layers
+
+schemas/*
+- Pydantic or equivalent typed contracts for internal and external payloads
+- single source of truth for graph state and API shapes
+
+ingestion/*
+- fetch and normalize official source material
+- enforce allowlist
+
+indexing/*
+- chunking, embedding, and vector upsert
+
+retrieval/*
+- retrieval-time logic only
+- no answer generation here
+
+rerank/service.py
+- isolate reranking so the strategy can change without touching graph logic
+
+answering/*
+- answer synthesis, citation formatting, refusal formatting
+
+graph/*
+- LangGraph state definitions and workflow composition
+- node implementations should orchestrate services, not contain low-level DB code
+
+guards/*
+- request-level checks for domain fit and personalized-advice framing
+
+services/chat_service.py
+- thin application service that invokes graph workflow for API requests
+
+22.4 Dependency direction
+
+Recommended dependency flow:
+
+- api -> services -> graph
+- graph -> retrieval, rerank, answering, guards, repositories, schemas
+- ingestion/indexing -> repositories, schemas, utils
+- repositories -> db client
+
+Avoid these dependencies:
+- repositories importing graph modules
+- retrieval importing API route code
+- answering importing HTTP request objects
+
+22.5 Suggested implementation conventions
+
+- keep all prompt builders in dedicated files
+- prefer typed return objects over unstructured dicts
+- keep DB row models separate from API response models
+- isolate third-party SDK calls behind small service wrappers
+- make every graph node independently testable
+
+
+23. Database Schema for MVP v1
+
+23.1 Database goals
+
+The initial schema should support:
+- official source ingestion
+- structured sections and chunk lineage
+- pgvector retrieval
+- ingestion observability
+- evaluation metadata
+
+The schema should not assume full analytics or multi-tenant auth in MVP.
+
+23.2 Extensions
+
+Supabase Postgres should enable:
+- pgvector
+- pgcrypto or equivalent UUID support if needed
+
+23.3 Recommended enums
+
+source_type enum:
+- inz_website
+- operational_manual
+
+document_status enum:
+- active
+- superseded
+- failed
+
+ingestion_status enum:
+- pending
+- running
+- completed
+- failed
+
+evaluation_status enum:
+- pending
+- running
+- completed
+- failed
+
+23.4 Core tables
+
+documents
+- canonical source document records
+
+document_sections
+- hierarchical document sections
+
+chunks
+- retrieval units with vectors and duplicated citation metadata
+
+ingestion_runs
+- pipeline run tracking
+
+ingestion_run_items
+- item-level success or failure tracking inside each ingestion run
+
+evaluation_runs
+- offline evaluation execution tracking
+
+evaluation_results
+- per-example evaluation results for analysis
+
+23.5 Suggested documents table
+
+Primary purpose:
+- represent one canonical official source page or manual page
+
+Suggested columns:
+- id uuid primary key
+- source_id text not null
+- source_type text not null
+- title text not null
+- url text not null
+- canonical_url text not null
+- section_path jsonb null
+- raw_content text not null
+- cleaned_content text not null
+- content_hash text not null
+- authority_rank integer not null default 100
+- effective_date timestamptz null
+- scraped_at timestamptz not null
+- status text not null default 'active'
+- metadata jsonb not null default '{}'::jsonb
+- created_at timestamptz not null default now()
+- updated_at timestamptz not null default now()
+
+Recommended constraints:
+- unique(canonical_url)
+- unique(source_type, source_id)
+
+Recommended indexes:
+- index on source_type
+- index on status
+- index on scraped_at desc
+- index on content_hash
+
+23.6 Suggested document_sections table
+
+Primary purpose:
+- preserve hierarchical source structure before and after chunking
+
+Suggested columns:
+- id uuid primary key
+- document_id uuid not null references documents(id) on delete cascade
+- parent_section_id uuid null references document_sections(id) on delete cascade
+- section_key text not null
+- heading text null
+- section_path_text text not null
+- level integer not null
+- ordinal integer not null
+- body_text text not null
+- metadata jsonb not null default '{}'::jsonb
+- created_at timestamptz not null default now()
+
+Recommended constraints:
+- unique(document_id, section_key)
+
+Recommended indexes:
+- index on document_id
+- index on parent_section_id
+- index on ordinal
+
+23.7 Suggested chunks table
+
+Primary purpose:
+- store retrievable evidence units
+
+Suggested columns:
+- id uuid primary key
+- document_id uuid not null references documents(id) on delete cascade
+- section_id uuid null references document_sections(id) on delete set null
+- chunk_index integer not null
+- chunk_text text not null
+- chunk_text_tsv tsvector null
+- token_count integer not null
+- embedding vector not null
+- title text not null
+- url text not null
+- section_label text null
+- source_type text not null
+- authority_rank integer not null default 100
+- effective_date timestamptz null
+- content_hash text not null
+- prev_chunk_id uuid null references chunks(id) on delete set null
+- next_chunk_id uuid null references chunks(id) on delete set null
+- metadata jsonb not null default '{}'::jsonb
+- created_at timestamptz not null default now()
+- updated_at timestamptz not null default now()
+
+Recommended constraints:
+- unique(document_id, chunk_index)
+
+Recommended indexes:
+- ivfflat or hnsw index on embedding
+- index on document_id
+- index on section_id
+- index on source_type
+- index on authority_rank
+- index on content_hash
+- GIN index on chunk_text_tsv if lexical retrieval is added
+
+23.8 Suggested ingestion_runs table
+
+Suggested columns:
+- id uuid primary key
+- status text not null
+- source_count integer not null default 0
+- document_count integer not null default 0
+- chunk_count integer not null default 0
+- error_summary text null
+- metadata jsonb not null default '{}'::jsonb
+- started_at timestamptz not null default now()
+- completed_at timestamptz null
+
+Recommended indexes:
+- index on status
+- index on started_at desc
+
+23.9 Suggested ingestion_run_items table
+
+Primary purpose:
+- record fetch/process result for each source item in a run
+
+Suggested columns:
+- id uuid primary key
+- ingestion_run_id uuid not null references ingestion_runs(id) on delete cascade
+- source_type text not null
+- source_locator text not null
+- status text not null
+- document_id uuid null references documents(id) on delete set null
+- content_hash text null
+- error_message text null
+- metadata jsonb not null default '{}'::jsonb
+- created_at timestamptz not null default now()
+
+Recommended indexes:
+- index on ingestion_run_id
+- index on status
+- index on source_type
+
+23.10 Suggested evaluation_runs table
+
+Suggested columns:
+- id uuid primary key
+- dataset_name text not null
+- status text not null
+- metrics jsonb not null default '{}'::jsonb
+- started_at timestamptz not null default now()
+- completed_at timestamptz null
+
+Recommended indexes:
+- index on dataset_name
+- index on status
+
+23.11 Suggested evaluation_results table
+
+Primary purpose:
+- store example-level eval output
+
+Suggested columns:
+- id uuid primary key
+- evaluation_run_id uuid not null references evaluation_runs(id) on delete cascade
+- example_id text not null
+- query text not null
+- expected_outcome text null
+- actual_answer text null
+- actual_grounded boolean null
+- actual_refusal boolean null
+- citation_coverage_score numeric null
+- groundedness_score numeric null
+- evaluator_notes text null
+- metadata jsonb not null default '{}'::jsonb
+- created_at timestamptz not null default now()
+
+Recommended indexes:
+- index on evaluation_run_id
+- index on example_id
+
+23.12 Schema notes
+
+Why duplicate title, url, section_label, and source_type onto chunks:
+- it simplifies retrieval responses
+- it avoids repeated joins on hot retrieval paths
+- it makes citation mapping cheaper and more reliable
+
+Why keep both raw_content and cleaned_content:
+- raw content supports debugging extraction issues
+- cleaned content supports reproducible chunking and indexing
+
+Why keep metadata jsonb on most tables:
+- it allows gradual extension without immediate schema churn
+- it should not replace first-class columns for frequently queried fields
+
+
+24. Initial Backend Contracts
+
+24.1 Internal schemas to define first
+
+Define these typed models before implementing services:
+- SourceDocument
+- DocumentSection
+- ChunkRecord
+- RetrievedChunk
+- EvidenceSufficiency
+- AnswerClaim
+- AnswerDraft
+- FinalResponse
+- ChatRequest
+- ChatResponse
+- IngestionRunSummary
+
+24.2 Repository layer contracts
+
+documents repository should support:
+- upsert_document()
+- get_document_by_url()
+- list_documents_by_source_type()
+
+sections repository should support:
+- replace_document_sections()
+- list_sections_for_document()
+
+chunks repository should support:
+- replace_document_chunks()
+- similarity_search()
+- fetch_neighbor_chunks()
+- get_chunks_by_ids()
+
+ingestion runs repository should support:
+- create_run()
+- update_run_status()
+- add_run_item()
+
+evaluation repository should support:
+- create_evaluation_run()
+- add_evaluation_result()
+
+24.3 Retrieval service contract
+
+Inputs:
+- user query
+- retrieval filters
+- top_k
+
+Outputs:
+- retrieved chunk list with scores and metadata
+
+The retrieval service should not:
+- generate user-facing answers
+- format final API payloads
+
+24.4 Answering service contract
+
+Inputs:
+- user query
+- selected evidence chunks
+- sufficiency result
+
+Outputs:
+- AnswerDraft or refusal draft
+
+The answering service should not:
+- hit the database directly
+- perform retrieval itself
+
+24.5 Chat service contract
+
+Responsibilities:
+- accept ChatRequest
+- invoke graph workflow
+- return ChatResponse
+- attach request ID and top-level logging context
+
+
+25. Recommended Next Build Step
+
+After this spec, the next concrete implementation step should be:
+
+1. create the backend folder structure
+2. define Pydantic schemas for core entities and responses
+3. define SQL migration files for the MVP schema
+4. wire a minimal database client and repository layer
+
+That sequence will keep the graph and ingestion work from drifting away from the persistence model.
