@@ -1,0 +1,741 @@
+NZ Immigration RAG Chat Application
+Architecture Spec for MVP v1
+
+1. Purpose
+
+Build a production-style, citation-first RAG assistant for New Zealand immigration information.
+
+The assistant must:
+- answer using only approved official Immigration New Zealand sources
+- ground every substantive answer in retrieved source content
+- always include citations
+- refuse to guess or fill gaps from model memory
+- say when retrieved content is insufficient or unclear
+- avoid personalized legal or immigration advice
+
+This document defines the MVP v1 architecture:
+- system components
+- data model
+- LangGraph state
+- request flow
+
+
+2. Scope
+
+In scope for MVP v1:
+- ingestion of approved official sources
+- content normalization and chunking
+- embeddings and vector indexing in Supabase pgvector
+- retrieval pipeline with filtering, reranking, and sufficiency checks
+- LangGraph orchestration for question answering
+- structured citations and source metadata
+- LangSmith tracing and evaluation
+- React chat UI for internal testing and demos
+
+Out of scope for MVP v1:
+- personalized immigration eligibility assessment
+- non-official sources
+- live web browsing by the assistant
+- multilingual support
+- advanced user accounts and full production auth
+- full document diffing and historical source version browsing
+
+
+3. Core Principles
+
+3.1 Evidence-bounded answering
+
+The assistant must answer only from retrieved official source material.
+If evidence is weak, incomplete, conflicting, or absent, the assistant must say so.
+
+3.2 Citation-first response generation
+
+Answer generation must be citation-aware from the start.
+Citations are not added after the fact.
+
+3.3 Official-source-only corpus
+
+The retrieval corpus must contain only allowlisted official sources:
+- Immigration New Zealand public website
+- Immigration Operational Manual
+
+3.4 No personalized advice
+
+The system may provide general official information and source citations.
+It must not recommend what an individual should do in their specific case.
+
+3.5 Traceability
+
+Every answer should be explainable through:
+- retrieved chunk IDs
+- source metadata
+- prompt and workflow traces
+- refusal reason where applicable
+
+
+4. High-Level Components
+
+4.1 Source ingestion service
+
+Responsibilities:
+- fetch approved official pages and manual content
+- validate source against allowlist
+- normalize extracted text and metadata
+- compute content hash for change detection
+- store raw and cleaned document records
+
+Inputs:
+- source allowlist and crawl config
+
+Outputs:
+- normalized document records
+
+4.2 Document processing service
+
+Responsibilities:
+- split documents by semantic structure first, token budget second
+- preserve section hierarchy
+- create chunk records with source metadata
+- attach parent-child relationships between document, section, and chunk
+
+Outputs:
+- chunk records ready for embedding and indexing
+
+4.3 Embedding and indexing service
+
+Responsibilities:
+- create embeddings for chunks
+- write vectors and metadata to Supabase Postgres with pgvector
+- upsert only changed chunks
+- maintain document and chunk version metadata
+
+Outputs:
+- retrievable vector index with metadata filters
+
+4.4 Retrieval service
+
+Responsibilities:
+- rewrite or normalize user queries for retrieval
+- apply metadata filters to official corpus
+- run vector retrieval
+- optionally expand to neighboring chunks for context
+- deduplicate results
+- rerank candidates
+- score evidence sufficiency
+
+Outputs:
+- ranked evidence set
+- sufficiency signal
+
+4.5 Answer generation service
+
+Responsibilities:
+- produce structured answer using only retrieved evidence
+- bind claims to citations
+- return refusal if evidence is insufficient
+- attach disclaimer and sources
+
+Outputs:
+- structured grounded answer payload
+
+4.6 LangGraph orchestration layer
+
+Responsibilities:
+- coordinate workflow state
+- handle control flow between rewrite, retrieval, reranking, sufficiency, and answer generation
+- support failure and refusal branches
+
+4.7 Evaluation and observability layer
+
+Responsibilities:
+- trace end-to-end runs in LangSmith
+- log retrieval quality and answer outcomes
+- evaluate citation coverage, refusal correctness, and answer grounding
+
+4.8 React frontend
+
+Responsibilities:
+- chat interface for testing and demos
+- render answer text with inline citations
+- show source panel with metadata
+- show warning that content is informational only
+- optionally expose retrieval debug view in internal mode
+
+
+5. Suggested Project Structure
+
+- backend/
+- backend/app/
+- backend/app/config/
+- backend/app/ingestion/
+- backend/app/indexing/
+- backend/app/retrieval/
+- backend/app/rerank/
+- backend/app/graph/
+- backend/app/answering/
+- backend/app/db/
+- backend/app/schemas/
+- backend/app/api/
+- backend/app/observability/
+- backend/tests/
+- backend/evals/
+- frontend/
+
+Notes:
+- prompts should live in versioned files or modules
+- schemas should be explicit and shared where practical
+- source metadata should flow through all backend layers without being dropped
+
+
+6. Source Model
+
+6.1 Allowed source types
+
+- inz_website
+- operational_manual
+
+6.2 Source allowlist rules
+
+Only pages from approved domains or official manual sources may enter the corpus.
+Any ingestion item outside the allowlist must be rejected before processing.
+
+6.3 Source metadata requirements
+
+Every source document must preserve:
+- title
+- canonical URL
+- section or heading path where available
+- source type
+- scraped_at
+- content hash
+- source ID
+
+
+7. Data Model
+
+The MVP data model can live in Supabase Postgres.
+Raw document storage may also be stored in Postgres initially for simplicity.
+
+7.1 documents table
+
+Purpose:
+- one row per canonical source document
+
+Recommended fields:
+- id: UUID primary key
+- source_id: stable external identifier
+- source_type: text
+- title: text
+- url: text unique
+- section_path: jsonb nullable
+- raw_content: text
+- cleaned_content: text
+- content_hash: text
+- authority_rank: integer
+- effective_date: timestamptz nullable
+- scraped_at: timestamptz
+- created_at: timestamptz
+- updated_at: timestamptz
+- status: text
+
+Notes:
+- authority_rank can be used later to bias ranking if needed
+- section_path may store heading hierarchy for manual and site pages
+
+7.2 document_sections table
+
+Purpose:
+- preserve structured sections before chunking
+
+Recommended fields:
+- id: UUID primary key
+- document_id: UUID foreign key
+- parent_section_id: UUID nullable
+- section_key: text
+- heading: text
+- section_path_text: text
+- body_text: text
+- ordinal: integer
+- created_at: timestamptz
+
+7.3 chunks table
+
+Purpose:
+- retrieval unit for embeddings and citations
+
+Recommended fields:
+- id: UUID primary key
+- document_id: UUID foreign key
+- section_id: UUID foreign key nullable
+- chunk_index: integer
+- chunk_text: text
+- token_count: integer
+- embedding: vector
+- title: text
+- url: text
+- section_label: text
+- source_type: text
+- authority_rank: integer
+- effective_date: timestamptz nullable
+- content_hash: text
+- prev_chunk_id: UUID nullable
+- next_chunk_id: UUID nullable
+- created_at: timestamptz
+- updated_at: timestamptz
+
+Notes:
+- duplicating key metadata on chunks is intentional for retrieval simplicity
+- prev_chunk_id and next_chunk_id support context expansion
+
+7.4 ingestion_runs table
+
+Purpose:
+- track pipeline runs
+
+Recommended fields:
+- id: UUID primary key
+- started_at: timestamptz
+- completed_at: timestamptz nullable
+- status: text
+- source_count: integer
+- document_count: integer
+- chunk_count: integer
+- error_summary: text nullable
+
+7.5 evaluation_runs table
+
+Purpose:
+- track offline evaluation results
+
+Recommended fields:
+- id: UUID primary key
+- dataset_name: text
+- started_at: timestamptz
+- completed_at: timestamptz nullable
+- status: text
+- metrics: jsonb
+
+
+8. Retrieval Metadata Contract
+
+Every retrieved chunk returned to the graph should include:
+- chunk_id
+- document_id
+- title
+- url
+- section_label
+- source_type
+- chunk_text
+- retrieval_score
+- rerank_score if available
+- authority_rank
+
+This metadata contract must remain stable because citations depend on it.
+
+
+9. Chunking Strategy
+
+9.1 Goals
+
+- preserve legal and policy context
+- avoid cutting off exceptions and conditions
+- preserve heading hierarchy
+- maintain chunk sizes suitable for retrieval and answer synthesis
+
+9.2 Strategy
+
+- split by document structure first
+- keep heading and subheading context in each chunk
+- use token-based secondary splitting only when sections are too large
+- include light overlap between adjacent chunks
+- preserve neighboring relationships for context expansion
+
+9.3 Anti-patterns to avoid
+
+- fixed-size blind chunking across headings
+- stripping section headers from chunks
+- mixing unrelated sections into one chunk
+
+
+10. Retrieval and Ranking Design
+
+10.1 Retrieval stages
+
+Stage 1: query normalization
+- clean user query
+- expand acronyms or normalize terminology when useful
+- preserve original query in state
+
+Stage 2: filtered vector retrieval
+- search only approved source types
+- retrieve top-k candidate chunks
+
+Stage 3: context expansion
+- optionally add neighbor chunks for top candidates
+- preserve which chunk matched directly and which were expanded
+
+Stage 4: deduplication and source grouping
+- remove near-duplicate chunks
+- prefer diversity across documents when appropriate
+
+Stage 5: reranking
+- rerank candidates using an LLM or reranker model
+- keep top-n evidence chunks for answer generation
+
+Stage 6: evidence sufficiency scoring
+- estimate whether retrieved evidence is sufficient to answer safely
+
+10.2 Evidence sufficiency criteria
+
+Evidence should be treated as insufficient when:
+- no relevant chunks are retrieved
+- top chunks are weakly related to the question
+- retrieved sources do not explicitly answer the question
+- evidence is fragmented and missing key conditions
+- retrieved content is conflicting and conflict cannot be explained safely
+- the user asks for personalized advice beyond official general guidance
+
+10.3 Hybrid retrieval note
+
+MVP v1 may start with vector retrieval plus metadata filtering.
+However, the design should leave room for lexical retrieval or hybrid search later because policy content often contains exact terms and clauses.
+
+
+11. LangGraph Workflow
+
+11.1 Target graph
+
+MVP v1 graph:
+- input_guard
+- query_rewrite
+- retrieve
+- expand_and_dedupe
+- rerank
+- sufficiency_check
+- answer_or_refuse
+- finalize_response
+
+11.2 Node responsibilities
+
+input_guard
+- validate request shape
+- classify whether the question is in domain
+- identify obvious personalized-advice framing
+
+query_rewrite
+- create retrieval-oriented reformulation
+- keep original query for display and traceability
+
+retrieve
+- run filtered vector retrieval against chunk index
+
+expand_and_dedupe
+- add neighbor chunks where useful
+- deduplicate overlapping or repeated evidence
+
+rerank
+- rank evidence for answer usefulness
+
+sufficiency_check
+- decide whether evidence supports a grounded answer
+- set refusal path when insufficient
+
+answer_or_refuse
+- generate structured answer from evidence only
+- or produce a refusal / uncertainty response
+
+finalize_response
+- format citations and sources
+- attach disclaimer
+- emit response payload
+
+
+12. LangGraph State Model
+
+State should be explicit and serializable.
+
+12.1 Core state fields
+
+- request_id: str
+- user_query: str
+- rewritten_query: str | null
+- normalized_query: str | null
+- user_intent_flags: list[str]
+- retrieval_filters: dict
+- retrieved_chunks: list[RetrievedChunk]
+- expanded_chunks: list[RetrievedChunk]
+- reranked_chunks: list[RetrievedChunk]
+- selected_evidence: list[RetrievedChunk]
+- sufficiency: EvidenceSufficiency
+- answer_draft: AnswerDraft | null
+- final_response: FinalResponse | null
+- refusal_reason: str | null
+- warnings: list[str]
+- trace_tags: dict
+
+12.2 RetrievedChunk schema
+
+- chunk_id: str
+- document_id: str
+- title: str
+- url: str
+- section_label: str | null
+- source_type: str
+- chunk_text: str
+- retrieval_score: float | null
+- rerank_score: float | null
+- authority_rank: int | null
+- is_neighbor_expansion: bool
+
+12.3 EvidenceSufficiency schema
+
+- is_sufficient: bool
+- confidence_label: str
+- reasons: list[str]
+- gaps: list[str]
+
+12.4 AnswerDraft schema
+
+- answer_text: str
+- claims: list[AnswerClaim]
+- disclaimer: str
+
+12.5 AnswerClaim schema
+
+- claim_text: str
+- citation_chunk_ids: list[str]
+
+12.6 FinalResponse schema
+
+- answer_text: str
+- citations: list[Citation]
+- sources: list[SourceReference]
+- disclaimer: str
+- grounded: bool
+- refusal_reason: str | null
+
+12.7 Citation schema
+
+- chunk_id: str
+- title: str
+- url: str
+- section_label: str | null
+- source_type: str
+
+12.8 SourceReference schema
+
+- document_id: str
+- title: str
+- url: str
+- source_type: str
+
+
+13. Answer Generation Contract
+
+13.1 Rules
+
+The answer generation step must:
+- use only selected evidence chunks
+- avoid facts not present in retrieved evidence
+- cite each substantive claim
+- separate factual content from limitations
+- state clearly when evidence is unclear or incomplete
+- avoid personalized recommendations
+
+13.2 Response style for MVP
+
+Suggested answer pattern:
+- concise direct answer if supported
+- brief explanation grounded in retrieved text
+- citation markers inline or sentence-level
+- short limitation note if needed
+- disclaimer that information is not personal immigration advice
+
+13.3 Refusal behavior
+
+If evidence is insufficient, the answer should say:
+- the system could not determine the answer from retrieved official sources
+- what type of uncertainty exists if possible
+- relevant source citations only if they are still useful context
+
+
+14. API Contract for Chat Response
+
+Suggested backend response shape:
+
+{
+  "answer_text": "...",
+  "grounded": true,
+  "refusal_reason": null,
+  "disclaimer": "...",
+  "citations": [
+    {
+      "chunk_id": "...",
+      "title": "...",
+      "url": "...",
+      "section_label": "...",
+      "source_type": "inz_website"
+    }
+  ],
+  "sources": [
+    {
+      "document_id": "...",
+      "title": "...",
+      "url": "...",
+      "source_type": "operational_manual"
+    }
+  ]
+}
+
+Important:
+- frontend should render citations from structured response fields
+- frontend must not try to infer citations from raw text alone
+
+
+15. Request Flow for MVP v1
+
+15.1 Ingestion flow
+
+1. Load approved source configuration.
+2. Fetch source content from allowlisted official sources.
+3. Normalize and clean text.
+4. Compute content hash.
+5. Store or update document records.
+6. Split into structured sections.
+7. Chunk sections with heading-aware strategy.
+8. Generate embeddings for changed chunks.
+9. Upsert chunks into Supabase pgvector.
+10. Record ingestion run metadata.
+
+15.2 User question flow
+
+1. User submits question in React frontend.
+2. Backend creates request ID and LangSmith trace.
+3. input_guard checks domain and advice framing.
+4. query_rewrite creates retrieval-oriented query.
+5. retrieve gets top-k official chunks from Supabase.
+6. expand_and_dedupe adds neighbor context and removes duplicates.
+7. rerank orders evidence relevance.
+8. sufficiency_check decides whether evidence can support a grounded answer.
+9. answer_or_refuse produces structured answer or refusal.
+10. finalize_response maps citations and source metadata.
+11. Backend returns structured response.
+12. Frontend renders answer, citations, and source drawer.
+
+15.3 Failure flow
+
+If retrieval or generation fails:
+- return safe fallback message
+- do not fabricate answer content
+- include a generic system error note if needed
+- log failure details to tracing and app logs
+
+
+16. LangSmith Tracing and Evaluation
+
+16.1 Trace each run
+
+Capture at minimum:
+- original query
+- rewritten query
+- retrieval parameters
+- retrieved chunk IDs and scores
+- reranked chunk IDs and scores
+- sufficiency decision
+- final answer
+- citations returned
+- refusal reason if any
+
+16.2 MVP evaluation categories
+
+Create an initial evaluation set covering:
+- answerable factual questions
+- ambiguous questions
+- unanswerable questions
+- personalized-advice questions
+- citation accuracy checks
+- retrieval quality checks
+
+16.3 MVP metrics
+
+Recommended early metrics:
+- citation coverage rate
+- grounded answer rate
+- correct refusal rate
+- retrieval precision at k
+- answer usefulness by human review
+
+
+17. Frontend MVP
+
+17.1 Required UI elements
+
+- chat conversation panel
+- answer display with citations
+- source list or side drawer
+- disclaimer banner
+- loading and error states
+
+17.2 Optional internal-only UI
+
+- retrieved evidence panel
+- debug scores
+- LangSmith trace link
+
+17.3 Frontend constraints
+
+- citations should be clickable
+- sources should show title, URL, section, and source type
+- refusal responses should be visually clear, not hidden
+
+
+18. Safety and Policy Constraints
+
+The assistant must:
+- use only approved official sources
+- avoid personalized legal or immigration advice
+- avoid unsupported extrapolation
+- be explicit about uncertainty
+- preserve citation traceability
+
+The assistant must not:
+- answer from model memory without evidence
+- cite unofficial or user-provided unsupported content as authority
+- present speculative outcomes as facts
+
+
+19. MVP Build Order
+
+Recommended implementation order:
+
+1. Define schemas and config.
+2. Build ingestion and normalization pipeline.
+3. Implement chunking and indexing.
+4. Implement retrieval and metadata contract.
+5. Implement LangGraph state and workflow.
+6. Implement structured answer generation with citations.
+7. Add LangSmith tracing.
+8. Build React chat frontend.
+9. Add evaluation dataset and regression checks.
+
+
+20. Open Decisions for v1
+
+These should be resolved before implementation starts:
+
+- exact allowlist of INZ domains and manual source paths
+- embedding model choice
+- reranker choice
+- chunk size and overlap defaults
+- whether hybrid lexical retrieval is included in MVP or deferred
+- how much Operational Manual hierarchy should be preserved in section labels
+- API framework choice for backend serving layer
+
+
+21. Recommended MVP Positioning
+
+This system should be positioned as:
+- an informational assistant over official New Zealand immigration content
+- a citation-first research and support tool
+- not a legal adviser
+- not an eligibility decision engine
