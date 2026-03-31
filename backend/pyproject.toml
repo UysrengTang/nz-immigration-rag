@@ -16,6 +16,9 @@ dependencies = [
   "uvicorn[standard]>=0.30.0,<1.0.0",
 ]
 
+[project.scripts]
+nz-rag-ingest = "app.cli.ingest:main"
+
 [build-system]
 requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"

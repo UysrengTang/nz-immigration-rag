@@ -12,6 +12,9 @@ class Settings(BaseSettings):
     openai_api_key: str | None = None
     openai_chat_model: str = "gpt-4.1-mini"
     openai_embedding_model: str = "text-embedding-3-large"
+    openai_base_url: str | None = None
+    openai_embedding_dimensions: int | None = Field(default=None, ge=1)
+    embedding_batch_size: int = Field(default=64, ge=1, le=512)
 
     database_url: str | None = None
     supabase_url: str | None = None

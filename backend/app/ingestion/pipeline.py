@@ -8,7 +8,7 @@ from app.db.repositories import (
     SectionsRepository,
 )
 from app.indexing.chunker import HeadingAwareChunker
-from app.indexing.embedder import EmbeddingProvider, NoOpEmbeddingProvider
+from app.indexing.embedder import EmbeddingProvider, build_default_embedding_provider
 from app.ingestion.normalize import normalize_source_payload
 from app.schemas.ingestion import IngestionResult, SourceIngestionPayload
 from app.schemas.ops import IngestionRunItemRecord, IngestionRunRecord
@@ -32,7 +32,7 @@ class IngestionPipeline:
         self.sections_repo = sections_repo or SectionsRepository()
         self.chunks_repo = chunks_repo or ChunksRepository()
         self.ingestion_runs_repo = ingestion_runs_repo or IngestionRunsRepository()
-        self.embedder = embedder or NoOpEmbeddingProvider()
+        self.embedder = embedder or build_default_embedding_provider()
         self.chunker = chunker or HeadingAwareChunker(
             chunk_size_tokens=settings.chunk_size_tokens,
             chunk_overlap_tokens=settings.chunk_overlap_tokens,
