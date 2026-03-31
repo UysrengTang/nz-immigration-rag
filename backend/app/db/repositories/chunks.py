@@ -91,6 +91,7 @@ class ChunksRepository(BaseRepository):
                 if row is None:
                     raise RuntimeError("Chunk insert returned no row.")
                 rows.append(row)
+            self._link_document_chunks(cur, rows)
 
         return [self._to_chunk_record(row) for row in rows]
 
@@ -195,3 +196,26 @@ class ChunksRepository(BaseRepository):
         if embedding is not None and not isinstance(embedding, list):
             row = {**row, "embedding": list(embedding)}
         return ChunkRecord.model_validate(row)
+
+    def _link_document_chunks(self, cursor, rows: list[dict]) -> None:
+        if not rows:
+            return
+
+        ordered_rows = sorted(rows, key=lambda row: row["chunk_index"])
+        update_query = """
+            update chunks
+            set prev_chunk_id = %s,
+                next_chunk_id = %s
+            where id = %s
+            returning *
+        """
+        for index, row in enumerate(ordered_rows):
+            prev_chunk_id = ordered_rows[index - 1]["id"] if index > 0 else None
+            next_chunk_id = (
+                ordered_rows[index + 1]["id"] if index < len(ordered_rows) - 1 else None
+            )
+            cursor.execute(update_query, (prev_chunk_id, next_chunk_id, row["id"]))
+            updated_row = cursor.fetchone()
+            if updated_row is None:
+                raise RuntimeError("Chunk linkage update returned no row.")
+            rows[index] = updated_row
